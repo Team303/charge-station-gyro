@@ -1,56 +1,22 @@
-`avr-hal-template`
-==================
-[`cargo-generate`] template for jumpstarting projects on common AVR
-microcontroller boards.  This template supports the following hardware at this
-time:
+# Charge Station Gyro
 
- - Arduino Leonardo
- - Arduino Mega 2560
- - Arduino Mega 1280
- - Arduino Nano
- - Arduino Nano New Bootloader (Manufactured after January 2018)
- - Arduino Uno
- - SparkFun ProMicro
- - Adafruit Trinket
- - Adafruit Trinket Pro
+This repository contains code for interacting with a standard ADXRS450 FRC gyroscope over SPI using an Arduino UNO for the purpose of displaying the state of the Charge Station.
 
-## Usage
-If you don't have them already, install [`cargo-generate`] and [`ravedude`]:
+Since the ADXRS450 gyro only provides the current angle rate, the rate is integrated over time to accumulate the current angle. This approach obviously has some error and according the to the data sheet, will drift roughly 25°/hour minimum.
 
-```bash
-cargo install cargo-generate
-cargo install ravedude
-```
+## Pins
 
-Then instanciate this template:
+| Name | Pin Number | Direction | Description                |
+| ---- | ---------- | --------- | -------------------------- |
+| SCLK | `13`       | OUT       | Serial Clock               |
+| MOSI | `11`       | OUT       | Master-Out Slave-In        |
+| MISO | `12`       | IN        | Master-In Slave-Out        |
+| CS0  | `10`       | OUT       | Chip Select 0 (active low) |
+| RST  | `5`        | IN        | Reset switch (active low)  |
+| LED  | `6`        | OUT       | LED Data                   |
 
-```bash
-cargo generate --git https://github.com/Rahix/avr-hal-template.git
-```
+## References
 
-You will be prompted to select your board - do so and you're ready to roll!
-Everything is prepared so you should be able to just
-
-```bash
-cargo run
-```
-
-and see a blinky flashed to your board!
-
-[`cargo-generate`]: https://github.com/cargo-generate/cargo-generate
-[`ravedude`]: https://github.com/Rahix/avr-hal/tree/next/ravedude
-
-## License
-Licensed under either of
-
- - Apache License, Version 2.0
-   ([LICENSE-APACHE](LICENSE-APACHE) or <http://www.apache.org/licenses/LICENSE-2.0>)
- - MIT license
-   ([LICENSE-MIT](LICENSE-MIT) or <http://opensource.org/licenses/MIT>)
-
-at your option.
-
-## Contribution
-Unless you explicitly state otherwise, any contribution intentionally submitted
-for inclusion in the work by you, as defined in the Apache-2.0 license, shall
-be dual licensed as above, without any additional terms or conditions.
+- [ADXRS450 Data Sheet](https://www.analog.com/media/en/technical-documentation/data-sheets/ADXRS450.pdf)
+- [ADXRS450 WPILib Implementation](https://github.com/wpilibsuite/allwpilib/blob/main/wpilibj/src/main/java/edu/wpi/first/wpilibj/ADXRS450_Gyro.java)
+- [SPI (Serial Peripheral Interface)](https://en.wikipedia.org/wiki/Serial_Peripheral_Interface)
