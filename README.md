@@ -15,6 +15,52 @@ Since the ADXRS450 gyro only provides the current angle rate, the rate is integr
 | RST  | `5`        | IN        | Reset switch (active low)  |
 | LED  | `6`        | OUT       | LED Data                   |
 
+## Quickstart
+
+You need a nightly Rust compiler for compiling Rust code for AVR. The correct version will be installed automatically due to the `rust-toolchain.toml` file.
+
+Install dependencies:
+
+- Ubuntu
+  ```bash
+  sudo apt install avr-libc gcc-avr pkg-config avrdude libudev-dev build-essential
+  ```
+- Macos
+  ```bash
+  xcode-select --install # if you haven't already done so
+  brew tap osx-cross/avr
+  brew install avr-gcc avrdude
+  ```
+- Windows
+
+  Install [Scoop](https://scoop.sh/) using Powershell
+
+  ```PowerShell
+  Set-ExecutionPolicy RemoteSigned -Scope CurrentUser # Needed to run a remote script the first time
+  irm get.scoop.sh | iex
+  ```
+
+  Install avr-gcc and avrdude
+
+  ```
+  scoop install avr-gcc
+  scoop install avrdude
+  ```
+
+  See [Setting up environment](https://github.com/Rahix/avr-hal/wiki/Setting-up-environment) for more information.
+
+Next, install `ravedude`, a tool which seamlessly integrates flashing your board into the usual cargo workflow:
+
+```bash
+cargo install ravedude
+```
+
+Finally, flash the code to the arduino and run it automatically:
+
+```bash
+cargo run
+```
+
 ## References
 
 - [ADXRS450 Data Sheet](https://www.analog.com/media/en/technical-documentation/data-sheets/ADXRS450.pdf)
