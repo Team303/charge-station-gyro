@@ -59,6 +59,7 @@ fn TIMER0_COMPA() {
     })
 }
 
+/// Gets the current time in milliseconds (since the program started)
 pub fn get_millis() -> u32 {
     avr_device::interrupt::free(|cs| MILLIS_COUNTER.borrow(cs).get())
 }
