@@ -4,54 +4,43 @@
 
 mod millis;
 
-use core::panic;
-
 use arduino_hal::hal::port::PB2;
 use arduino_hal::prelude::*;
-use arduino_hal::spi;
 use arduino_hal::spi::ChipSelectPin;
 use arduino_hal::spi::DataOrder;
 use arduino_hal::spi::SerialClockRate;
 use arduino_hal::Spi;
 use embedded_hal::digital::v2::OutputPin;
-use embedded_hal::spi::FullDuplex;
 use embedded_hal::spi::MODE_0;
 use panic_halt as _;
 
 const SAMPLE_PERIOD: u16 = 2;
-const CALIBRATION_SAMPLE_TIME: u16 = 5_000;
-const DEGREE_PER_SECOND_PER_LSB: f32 = 0.0125;
+const CALIBRATION_SAMPLE_TIME: u32 = 5_000;
+const DEGREE_PER_SECOND_PER_LSB: f32 = 1.0 / 80.0;
 
-/**
- * Represents the registers in the device's memory
- *
- * Each register has a low and high address (n + 1), and some like CST span a total of 4 addresses
- */
-#[allow(dead_code)]
-enum Register {
-    Rate,
-    Temp,
-    ContinuousSelfTestLow,
-    ContinuousSelfTestHigh,
-    Quad,
-    Fault,
-    PartID,
-    SerialNumberHigh,
-    SerialNumberLow,
-}
+pub mod serial {
+    use avr_device::interrupt::Mutex;
+    use core::cell::RefCell;
 
-impl Register {
-    fn get_address(&self) -> u16 {
-        match self {
-            Register::Rate => 0x00,
-            Register::Temp => 0x02,
-            Register::ContinuousSelfTestLow => 0x04,
-            Register::ContinuousSelfTestHigh => 0x06,
-            Register::Quad => 0x08,
-            Register::Fault => 0x0A,
-            Register::PartID => 0x0C,
-            Register::SerialNumberHigh => 0x0E,
-            Register::SerialNumberLow => 0x10,
+    pub type Usart = arduino_hal::hal::usart::Usart0<arduino_hal::DefaultClock>;
+    pub static GLOBAL_SERIAL: Mutex<RefCell<Option<Usart>>> = Mutex::new(RefCell::new(None));
+
+    pub fn init(serial: Usart) {
+        avr_device::interrupt::free(|cs| {
+            GLOBAL_SERIAL.borrow(cs).replace(Some(serial));
+        })
+    }
+
+    #[macro_export]
+    macro_rules! serial_println {
+        ($($arg:tt)*) => {
+            ::avr_device::interrupt::free(|cs| {
+                if let Some(serial) = &mut *crate::serial::GLOBAL_SERIAL.borrow(cs).borrow_mut() {
+                    ::ufmt::uwriteln!(serial, $($arg)*)
+                } else {
+                    Ok(())
+                }
+            }).void_unwrap()
         }
     }
 }
@@ -66,18 +55,25 @@ fn setup() -> ! {
     let sclk = pins.d13.into_output();
     let mosi = pins.d11.into_output();
     let miso = pins.d12.into_pull_up_input();
-    let cs0 = pins.d10.into_output();
+    let cs0 = pins.d10.into_output_high();
 
     let reset_pin = pins.d5.into_pull_up_input();
 
     // Set up serial interface for text output
-    let mut serial = arduino_hal::default_serial!(dp, pins, 57600);
+    let serial = arduino_hal::default_serial!(dp, pins, 57600);
 
+    serial::init(serial);
+
+    serial_println!("[+] Initializing `millis` interrupt");
     // Setup millisecond interrupt
     millis::millis_init(dp.TC0);
 
+    serial_println!("[+] Enabling global interrupt");
+
     // Enable interrupts globally
     unsafe { avr_device::interrupt::enable() };
+
+    serial_println!("[+] Creating SPI interface");
 
     // Create SPI interface.
     let (spi, cs) = arduino_hal::Spi::new(
@@ -86,18 +82,19 @@ fn setup() -> ! {
         mosi,
         miso,
         cs0,
-        spi::Settings {
+        arduino_hal::spi::Settings {
             data_order: DataOrder::MostSignificantFirst,
             clock: SerialClockRate::OscfOver128,
             mode: MODE_0,
         },
     );
 
+    serial_println!("[+] Creating gyro instance");
+
     // Create gyro instance
-    let mut gyro = match ADXRS450::new(spi, cs) {
-        Ok(gyro) => gyro,
-        Err(e) => panic!("{}", e.as_str()),
-    };
+    let mut gyro = ADXRS450::new(spi, cs);
+
+    serial_println!("[+] Entering main loop");
 
     loop {
         // If reset switch is pulled low (closed), reset the gyro
@@ -109,11 +106,16 @@ fn setup() -> ! {
         gyro.update();
 
         // Print out gyro state
-        ufmt::uwriteln!(&mut serial, "Gyro Rate: {}°/s | Gyro Angle: {}°\r", gyro.get_rate() as u32, gyro.get_angle() as u32).void_unwrap();
+        serial_println!(
+            "[?] Gyro Rate: {:?}°/s | Gyro Angle: {:?}°\r",
+            gyro.get_rate() as i32,
+            gyro.get_angle() as i32
+        );
 
         // Wait before continuing (trying to get 500Hz)
         arduino_hal::delay_ms(SAMPLE_PERIOD);
-    }}
+    }
+}
 
 struct ADXRS450 {
     spi: Spi,
@@ -121,117 +123,92 @@ struct ADXRS450 {
     acc: AccumulatorF32,
 }
 
-enum ADXRS450Error {
-    DeviceNotFound(u16),
-}
-
-impl ADXRS450Error {
-    fn as_str(&self) -> &'static str {
-        match &self {
-            ADXRS450Error::DeviceNotFound(_) => "could not find ADXRS450 gyro on SPI port",
-        }
-    }
-}
-
 impl ADXRS450 {
-    fn new(spi: Spi, cs: ChipSelectPin<PB2>) -> Result<Self, ADXRS450Error> {
+    fn new(spi: Spi, cs: ChipSelectPin<PB2>) -> Self {
         let mut gyro = ADXRS450 {
             spi,
             cs,
             acc: AccumulatorF32::new(),
         };
 
-        /* Validate the part ID */
-
-        let part_id = gyro.read_register(Register::PartID);
-
-        // Lower byte is the revision number, so only check that the high byte is 0x52
-        if (part_id & 0xff00) != 0x5200 {
-            return Err(ADXRS450Error::DeviceNotFound(part_id));
-        }
-
         gyro.calibrate();
 
-        Ok(gyro)
+        gyro
     }
 
-    pub fn read_register(&mut self, register: Register) -> u16 {
-        /*
-        | Read Command:
-        |
-        | 00000000 00000000 00000000 00000000
-        | cccsssaa aaaaaaad dddddddd dddddddp
-        | ^                                 ^
-        | MSB                             LSB
-
-        | 31-29 (c) bits are the read command instruction (0b100)
-        | 28-26 (s) are SM2-SM0 (all 0s for the ADXRS450)
-        | 25-17 (a) are are the 9 bit register address A8-A0
-        | 16-1 (d) are the 16 data bits D15-D0 (all 0s for the read command)
-        | 0 (p) is the parity bit
-        */
-
-        let mut command: u32 = 0;
-
-        // Read instruction
-        command |= 0b10000000_00000000_00000000_00000000;
-
-        // Address register
-        command |= (register.get_address() as u32) << 17;
-
-        // Parity bit
-        command |= calculate_parity(command) as u32;
+    fn read_sensor_data(&mut self) -> u16 {
+        // Begin Write
 
         self.cs.set_low().unwrap();
 
-        nb::block!(self.spi.send((command & 0xFF000000 >> 24) as u8)).void_unwrap();
-        nb::block!(self.spi.send((command & 0x00FF0000 >> 16) as u8)).void_unwrap();
-        nb::block!(self.spi.send((command & 0x0000FF00 >> 8) as u8)).void_unwrap();
-        nb::block!(self.spi.send((command & 0x000000FF >> 0) as u8)).void_unwrap();
+        self.spi.transfer(&mut [0x20, 0x00, 0x00, 0x00]).unwrap();
 
         self.cs.set_high().unwrap();
+
+        // End Write
+
+        arduino_hal::delay_us(500);
+
+        // Begin Read
+
         self.cs.set_low().unwrap();
 
-        let data_0 = nb::block!(self.spi.read()).void_unwrap();
-        let data_1 = nb::block!(self.spi.read()).void_unwrap();
-        let data_2 = nb::block!(self.spi.read()).void_unwrap();
-        let data_3 = nb::block!(self.spi.read()).void_unwrap();
+        let mut data = [0; 4];
+        self.spi.transfer(&mut data).unwrap();
 
         self.cs.set_high().unwrap();
 
-        // Check if 3 MSB are all 0 (Error Returned)
-        if (data_0 & 0b1110_0000) == 0 {
+        // End Read
+
+        let response = u32::from_be_bytes(data);
+
+        // Check if status bits are not 0b01 (Error Returned)
+        if ((response >> 24 & 0b0000_1100) >> 2) != 0b01 {
+            serial_println!("[?] read_sensor_data() produced an error! ");
             return 0;
         }
 
         // TODO: Check response parity bits
 
-        let response = u32::from_be_bytes([data_0, data_1, data_2, data_3]);
-
         // Extract the 16 data bits and shift them down to a u16
-        (response & 0b00000000_00011111_11111111_11100000 >> 5) as u16
+        ((response & 0b00000011_11111111_11111100_00000000) >> 10) as u16
     }
 
     pub fn update(&mut self) {
-        let rate = self.read_register(Register::Rate);
-        let rate = i16::from_be_bytes([(rate & 0xFF00 >> 8) as u8, (rate & 0x00FF >> 0) as u8]);
-        let rate = rate as f32 / 80.0f32;
+        let rate = self.read_sensor_data();
+        let rate = i16::from_be_bytes(rate.to_be_bytes());
 
-        self.acc.add_data(rate);
+        self.acc.add_data(rate as f32);
     }
 
     pub fn calibrate(&mut self) {
+        serial_println!("[+] Starting calibration...");
+
         arduino_hal::delay_ms(100);
 
         self.acc.set_integrated_center(0.0);
         self.acc.reset();
 
-        arduino_hal::delay_ms(CALIBRATION_SAMPLE_TIME);
+        let start_time = millis::get_millis();
+
+        loop {
+            if millis::get_millis() - start_time > CALIBRATION_SAMPLE_TIME {
+                break;
+            }
+
+            // Update the gyro accumulator
+            self.update();
+
+            // Wait before continuing (trying to get 500Hz)
+            arduino_hal::delay_ms(SAMPLE_PERIOD);
+        }
 
         let average = self.acc.get_integrated_average();
 
         self.acc.set_integrated_center(average);
         self.acc.reset();
+
+        serial_println!("[+] Finished calibration!");
     }
 
     pub fn reset(&mut self) {
@@ -245,17 +222,6 @@ impl ADXRS450 {
     pub fn get_rate(&self) -> f32 {
         self.acc.get_last_value() * DEGREE_PER_SECOND_PER_LSB
     }
-}
-
-fn calculate_parity(mut value: u32) -> bool {
-    let mut parity = false;
-
-    while value != 0 {
-        parity = !parity;
-        value = value & (value - 1);
-    }
-
-    parity
 }
 
 struct AccumulatorF32 {
@@ -287,9 +253,9 @@ impl AccumulatorF32 {
     pub fn add_data(&mut self, value: f32) {
         let time = millis::get_millis();
 
-        let delta_time = time - self.last_time;
+        let delta_time_ms = time - self.last_time;
         let area =
-            delta_time as f32 * 1e-3 * (self.last_value + value) / 2.0 - self.integrated_center;
+            delta_time_ms as f32 * 1e-3 * (self.last_value + value) / 2.0 - self.integrated_center;
 
         self.accumulated += area;
         self.last_value = value;
